@@ -13,5 +13,12 @@ logo.onAdd = function(map) {
   div.innerHTML = '<img src="img/mapbox-logo-white.png" width="100"/>';
   return div;
 };
-
 logo.addTo(map);
+
+fetch('data/airports.geojson')
+    .then(response => response.json())
+    .then(data => {
+        // var vorP = turf.voronoi(data);
+        L.geoJSON(data).addTo(map);
+        //console.log(data);
+    }).catch(error => console.error('Error: ', error));
