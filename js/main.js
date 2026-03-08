@@ -1,13 +1,32 @@
-const map = L.map('map').setView([36, -94], 4.1);
-
+const map = L.map('map').setView([20, -10], 2.5);
+map.setMaxBounds([[-90, -180], [90, 180]]); //sets map bounds
 L.tileLayer('https://api.mapbox.com/styles/v1/jandre-pro/cmlwyuil3000401sm8dnye6eg/tiles/256/{z}/{x}/{y}@2x?access_token=pk.eyJ1IjoiamFuZHJlLXBybyIsImEiOiJjbWxmaTFsOTIwMjY5M2VvaWIzbWgyb3F2In0.6E3iTTICdzYRJcjiQGGCMQ', {
-        maxZoom: 19,
+        minZoom: 2.5,
+        maxZoom: 17,
+        noWrap: true,//only draws tiles for the initial world view
+        bounds: [[-90, -180], [90, 180]], //sets bounds of world map for tile layer
+        maxBounds: [[-90, -180], [90, 180]],// sets max bounds for pan area
+        maxBoundsViscosity: 5.0, // defines how strong the edges will snap back when trying to pan out of bounds
         attribution: 'Map data &copy; <a href="http://openstreetmap.org">OpenStreetMap</a> contributors, ' +
                      '<a href="http://creativecommons.org/licenses/by-sa/2.0/">CC-BY-SA</a>, ' +
                      'Imagery © <a href="http://mapbox.com">Mapbox</a>',
 }).addTo(map);
+
+//////////// Adds legend control to change with selected layer//////////////
+let legend = L.control({ position: "bottomright" });
+
+legend.onAdd = function (map) {
+    let div = L.DomUtil.create("div", "info legend");
+    div.innerHTML = ""; // will be filled dynamically
+    return div;
+};
+legend.addTo(map);
+
+///////////////////////Map box logo attribution///////////////////////////
+
 var logo = L.control({position: 'bottomleft'});
 
+//add mapBox logo to map for required attribution
 logo.onAdd = function(map) {
   var div = L.DomUtil.create('div', 'mapbox-logo');
   div.innerHTML = '<img src="img/mapbox-logo-white.png" width="100"/>';
@@ -15,6 +34,7 @@ logo.onAdd = function(map) {
 };
 logo.addTo(map);
 
+/////////////////////// Fetch geoJSONs ////////////////////////////////
 
 // make airport data accessible to polygons
 let airportData;   // global variable
@@ -25,106 +45,157 @@ fetch('data/airports.geojson')
   .then(data => {
       console.log(data);
       airportData = data;   // define airport data for turf analysis
-      // createSymbols(data).addTo(map);  // Turn on to see symbols on the map
-  }).catch(error => console.error('Airports Error: ', error)); //prints error if something fails
 
-// Load State data
-fetch('data/ne_10m_admin_1_states_provinces.json')
-  .then(response => response.json())
-  .then(data => {
-      console.log(data);
-      // Run Turf count before adding to map
-      addAirportCounts(data, airportData);
+// Load State data within airports fetch so airports load first
+    fetch('data/ne_10m_admin_1_states_provinces.json')
+    .then(response => response.json())
+    .then(data => {
+        console.log(data);
+        // Run Turf count before adding to map
+        addAirportCounts(data, airportData);
 
-      let countLayer = L.geoJSON(data, {
-          style: countStyle,
-          onEachFeature: (feature, layer) => onEachFeature(feature, layer, "count")
-      });
+        //create variables that hold layers to cycle through with L.control.layers
+        //this assigns the choropleth layer to countLayer
+        let countLayer = L.geoJSON(data, {
+            style: countStyle,
+            onEachFeature: (feature, layer) => onEachFeature(feature, layer, "count")
+        });
+        //this assigns the second choropleth layer to seviceLayer
+        let serviceLayer = L.geoJSON(data, {
+            style: serviceStyle,
+            onEachFeature: (feature, layer) => onEachFeature(feature, layer, "service")
+        });
 
-      let serviceLayer = L.geoJSON(data, {
-          style: serviceStyle,
-          onEachFeature: (feature, layer) => onEachFeature(feature, layer, "service")
-      });
+        //CREATE CENTROID DATASET
+        //add to constant variable
+        const centroidCollection = createCentroids(data);
 
-      // let symbolLayer = createProportionalSymbols(data);
-      countLayer.addTo(map);
+        //proportional symbols based on area
+        // assigns prop layer to symbolLayer
+        let symbolLayer = createProportionalSymbols(centroidCollection);
+        
+        //default layer when map opens
+        countLayer.addTo(map);
+        //legend for default layer
+        legend.getContainer().innerHTML = getCountLegendHTML();
+        //Adds a bubble data layer selector to switch between the layers
+        L.control.layers(
+            {
+                "Airport Count (Choropleth)": countLayer,
+                "Average Airport Service Area": serviceLayer,
+                "Airport Count (Proportional)": symbolLayer
+            }
+        ).addTo(map);
+        // Update legend when user switches layers
+            map.on("baselayerchange", function (e) {
 
-      L.control.layers(
-          {
-              "Airport Count": countLayer,
-              "Average Airport Service Area": serviceLayer,
-              // "Proportional Symbols": symbolLayer
-          }
-      ).addTo(map);
+                if (e.name === "Airport Count (Choropleth)") {
+                    legend.getContainer().innerHTML = getCountLegendHTML();
+                }
+                else if (e.name === "Average Airport Service Area") {
+                    legend.getContainer().innerHTML = getServiceLegendHTML();
+                }
+                else if (e.name === "Airport Count (Proportional)") {
+                    legend.getContainer().innerHTML = getSymbolLegendHTML();
+                }
 
-  })
-  .catch(error => console.error('States Error: ', error));
+            });
+    });
+}).catch(error => console.error('States Error: ', error));
 
+/////////////////     Perform spatial analysis for symbols     ////////////////
 
 // Turf Function to count airports and add new attribute to each polygon
 function addAirportCounts(states, airports) {
 
+    //create constant that lets us intersect airports with state polygons
     const airportPoints = turf.featureCollection(airports.features);
 
+    // Loop through every state polygon in the GeoJSON
     states.features.forEach(state => {
-
+        
+        // Find all airport points that fall inside this state polygon
         const pointsWithin = turf.pointsWithinPolygon(
             airportPoints,
             state
         );
 
+        // Store the number of airports inside this state
         state.properties.airport_count = pointsWithin.features.length;//adds attribute airport_counts
+        
+        // Compute the state's area in square kilometers
         state.properties.area_sqkm = turf.area(state) / 1000000;
+        
         // normalize by service area =  square km/ airport count
+        // Only do this if the state has at least one airport
         if (state.properties.airport_count > 0) {
                 state.properties.airport_service = state.properties.area_sqkm / state.properties.airport_count;
         } else {
+                // If no airports, set service area to 0 to avoid dividing by zero to get infinity output
                 state.properties.airport_service = 0; 
-        }
-        // state.properties.area_sqkm = turf.area(state) / 1000000;
-        // state.properties.airport_service = state.properties.area_sqkm/state.properties.airport_count;
-      });
+        }     
+    }); // end loop
+}
+
+function createCentroids(states) {
+    //map each state polygon to a centroid point
+    const centroids = states.features.map(state => {
+            const c = turf.centroid(state); //finds the geometric center of the polygon
+            
+            // Copy the attributes the centroid will contain
+            // These will be used for the popups and proportional symbols
+            c.properties = {
+            name: state.properties.name,
+            // area_sqkm: state.properties.area_sqkm,
+            airport_count: state.properties.airport_count,
+            // airport_service: state.properties.airport_service
+        };
+        return c;
+    });
+    return turf.featureCollection(centroids);
 }
 
 ///////////////     CREATE MAP STYLES     ///////////////////
 //create color ramp for airport_count choropleth map
 function getColor(d) {
-    return d > 100 ? '#800026' :
-           d > 50  ? '#BD0026' :
-           d > 20  ? '#E31A1C' :
-           d > 10  ? '#FC4E2A' :
-           d > 0   ? '#FD8D3C' :
-                     '#FFEDA0' ;
-}
+    return d > 12 ? '#800026' :
+           d > 9  ? '#BD0026' :
+           d > 6  ? '#fc4e2a' :
+           d > 3  ? '#FD8D3C' :
+           d > 0   ? '#FFEDA0' :
+                     '#35343473' ;
+};
 //create function that applies the color ramp to symbolize polygons based on total airport_count
 function countStyle(feature) {
     return {
         fillColor: getColor(feature.properties.airport_count),
         weight: 1,
         opacity: 1,
-        color: 'white',
-        fillOpacity: 0.7
+        color: '#35343473',
+        fillOpacity: 1
     };
-}
+};
 //create color ramp for airport_service choropleth map
 function getServiceColor(d) {
     return d > 500000  ? '#800026' :
            d > 100000  ? '#BD0026' :
-           d > 50000  ? '#E31A1C' :
-           d > 10000 ? '#FC4E2A' :
-           d > 0     ? '#FD8D3C' :
-                       '#FFEDA0' ;
-}
+           d > 50000  ? '#FC4E2A' :
+           d > 10000 ? '#FD8D3C' :
+           d > 0     ? '#f8cb04ff' :
+                       '#35343473' ;
+};
 //create function that applies the color ramp to symbolize polygons based on total airport_service area
 function serviceStyle(feature) {
     return {
         fillColor: getServiceColor(feature.properties.airport_service),
-        weight: 1,
-        color: "white",
-        fillOpacity: 0.7
+        weight: .5,
+        color: '#35343473',
+        fillOpacity: 1
     };
-}
+};
 let selectedLayer = null;
+
+///////////////////  Add click listener for the layers ///////////////////
 
 function onEachFeature(feature, layer, type = "count") {
 
@@ -145,11 +216,93 @@ function onEachFeature(feature, layer, type = "count") {
 
             layer.bindPopup(
                 "<b>" + feature.properties.name + "</b><br>" +
-                (type === "service" ? "Airport Service area in sq. km: " : "Airports: ") + value
+                (type === "service" ? "Airport Service area (sq. km): " : "Airports: ") + value
             ).openPopup();
         }
     });
 }
+
+///////////Create proportional symbols for state area layer///////////////
+
+function createProportionalSymbols(centroids) {
+    return L.geoJSON(centroids, {
+        pointToLayer: function (feature, latlng) {
+            
+            if (feature.properties.airport_count === 0) {
+                return null;
+            }
+            // Scale symbol by area
+            let radius = feature.properties.airport_count * 3;
+
+            return L.circleMarker(latlng, {
+                radius: radius,
+                fillColor: "#ff7800",
+                color: "#000",
+                weight: 1,
+                fillOpacity: 0.6
+            }).bindPopup(
+                `<strong>${feature.properties.name}</strong><br>
+                 Airports: ${feature.properties.airport_count.toFixed(0)}`
+            );
+        }
+    });
+}
+
+/////////////// Create the Legends for each layer //////////////////
+
+// Legend for Airport Count choropleth
+function getCountLegendHTML() {
+    return `
+        <h4>Airport Count</h4>
+        <i style="background:#35343473"></i> 0<br>
+        <i style="background:#ffeda0"></i> 1 - 2<br>
+        <i style="background:#Fd8d3c"></i> 3 - 5<br>
+        <i style="background:#fc4e2a"></i> 6 - 8<br>
+        <i style="background:#BD0026"></i> 9 - 11<br>
+        <i style="background:#800026"></i> 12+<br>
+    `;
+}
+
+// Legend for Airport Service Area choropleth
+function getServiceLegendHTML() {
+    return `
+        <h4>Average Area Serviced per Airport (sq km)</h4>
+        <i style="background:35343473"></i>    0<br>
+        <i style="background:#f8cb04ff"></i> >= 1<br>
+        <i style="background:#FD8D3C"></i> >= 10000<br>
+        <i style="background:#FC4E2A"></i> >= 50000<br>
+        <i style="background:#BD0026"></i> >= 100000<br>
+        <i style="background:#800026"></i> >= 500000<br>
+    `;
+}
+
+// Legend for Proportional Symbols
+function getSymbolLegendHTML() {
+    return `
+        <h4>Airport Count</h4>
+        <svg width="100" height="80">
+
+        //Largest circle (goes in back)
+        <circle cx="40" cy="41" r="36" fill="#ff7800" stroke="#000"></circle>
+
+        <circle cx="40" cy="50" r="27" fill="#ff7800" stroke="#000"></circle>
+
+        <circle cx="40" cy="60" r="18" fill="#ff7800" stroke="#000"></circle>
+
+        <circle cx="40" cy="69" r="9" fill="#ff7800" stroke="#000"></circle>
+
+        // Smallest circle (front)
+        <circle cx="40" cy="75" r="3" fill="#ff7800" stroke="#000"></circle>
+
+        //Labels
+        <text x="78" y="9" font-size="12" font-weight="bold">13</text>   //top label
+        <text x="78" y="77" font-size="12" font-weight="bold">1</text>   //bottom label
+
+</svg>
+    `;
+}
+
+getData();
 // function onEachFeature(feature, layer) {
 
 //     layer.on({
@@ -234,21 +387,21 @@ function onEachFeature(feature, layer, type = "count") {
 // });
 
 //create symbology for airports
-function createSymbols(data) {
+// function createSymbols(data) {
 
-    L.geoJSON(data, {
-        pointToLayer: function(feature, latlng) {
-            return L.circleMarker(latlng, {
-                radius: 6,
-                fillColor: "#ff7800",
-                color: "#000",
-                weight: 1,
-                opacity: 1,
-                fillOpacity: 0.8
-            });
-        }
-    }).addTo(map);
-}
+//     L.geoJSON(data, {
+//         pointToLayer: function(feature, latlng) {
+//             return L.circleMarker(latlng, {
+//                 radius: 6,
+//                 fillColor: "#ff7800",
+//                 color: "#000",
+//                 weight: 1,
+//                 opacity: 1,
+//                 fillOpacity: 0.8
+//             });
+//         }
+//     }).addTo(map);
+// }
 //Add the json files to the map
 // function getData() {
 //       fetch('data/airports.geojson')
@@ -288,5 +441,19 @@ function createSymbols(data) {
 
 // });
 
-getData();
+// state.properties.airport_service = state.properties.area_sqkm/state.properties.airport_count;
+        // const centroidFeature = states.features.map(states =>{///new
+        //     const centroid = turf.centroid(states);////new
+        //     centroid.properties = {///new
+        //         ...state.properties.area_sqkm,///new
+        //         point_count:count///new
+        //     };
+        //     return centroid;///new
+        // });
+        // const centroidCollection = turf.featureCollection(centroidFeature);// new
+        // var lat = centroid.geometry.coordinates[1];
+        // var lon = centroid.geometry.coordinates[0];
+        // L.marker([lat, lon])
+        //     .addTo(map)
+        //     .bindPopup(state.properties.name + " centroid");
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
